@@ -54,28 +54,44 @@ end
 
 local function save_scroll_position(term)
   if term.window and vim.api.nvim_win_is_valid(term.window) then
-    local cursor_pos = vim.api.nvim_win_get_cursor(term.window)
-    local view = vim.api.nvim_win_call(term.window, function()
-      return vim.fn.winsaveview()
+    pcall(function()
+      local cursor_pos = vim.api.nvim_win_get_cursor(term.window)
+      local view = vim.api.nvim_win_call(term.window, function()
+        return vim.fn.winsaveview()
+      end)
+      terminal_scroll_positions[term.count] = {
+        cursor = cursor_pos,
+        view = view,
+      }
     end)
-    terminal_scroll_positions[term.count] = {
-      cursor = cursor_pos,
-      view = view,
-    }
   end
 end
 
 local function restore_scroll_position(term)
   if term.window and vim.api.nvim_win_is_valid(term.window) and terminal_scroll_positions[term.count] then
-    local saved_pos = terminal_scroll_positions[term.count]
-    vim.api.nvim_win_call(term.window, function()
-      vim.fn.winrestview(saved_pos.view)
+    pcall(function()
+      local saved_pos = terminal_scroll_positions[term.count]
+      vim.api.nvim_win_call(term.window, function()
+        vim.fn.winrestview(saved_pos.view)
+      end)
+      vim.defer_fn(function()
+        if term.window and vim.api.nvim_win_is_valid(term.window) then
+          local buf = vim.api.nvim_win_get_buf(term.window)
+          local line_count = vim.api.nvim_buf_line_count(buf)
+          local row, col = saved_pos.cursor[1], saved_pos.cursor[2]
+
+          -- Ensure cursor position is within buffer bounds
+          if row > line_count then
+            row = line_count
+          end
+          if row < 1 then
+            row = 1
+          end
+
+          pcall(vim.api.nvim_win_set_cursor, term.window, {row, col})
+        end
+      end, 50)
     end)
-    vim.defer_fn(function()
-      if term.window and vim.api.nvim_win_is_valid(term.window) then
-        vim.api.nvim_win_set_cursor(term.window, saved_pos.cursor)
-      end
-    end, 50)
   end
 end
 
@@ -807,6 +823,23 @@ M.setup = function(opts)
   map("t", "<C-w>", M.close_current_terminal, { desc = "Close current terminal and switch to next" })
   map("t", "<D-w>", M.close_current_terminal, { desc = "Close current terminal and switch to next" })
   map("t", "<M-w>", M.close_current_terminal, { desc = "Close current terminal and switch to next" })
+
+  -- Fix paste in terminal mode
+  map("t", "<D-v>", function()
+    local clipboard = vim.fn.getreg("+")
+    if clipboard and clipboard ~= "" then
+      -- Send clipboard content to terminal
+      if #terminals > 0 and terminals[current_term] then
+        local term = terminals[current_term]
+        if term.use_zellij and term.zellij_session then
+          local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(clipboard)
+          vim.fn.system(cmd)
+        else
+          term:send(clipboard)
+        end
+      end
+    end
+  end, { desc = "Paste in terminal" })
 
   map("t", "<C-h>", "<C-\\><C-N><C-w>h", { desc = "Terminal left window nav" })
   map("t", "<C-j>", "<C-\\><C-N><C-w>j", { desc = "Terminal down window nav" })
