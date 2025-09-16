@@ -23,10 +23,10 @@ A minimalist Neovim plugin for managing a single terminal tab with tmux integrat
 
 ### Leader Key Commands
 - `<leader>ti` - Show terminal info
-- `<leader>tg` - Git terminal (runs `git status`)
-- `<leader>td` - Dev server terminal (auto-detects npm/cargo)
-- `<leader>tt` - Test terminal (auto-detects npm/cargo)
-- `<leader>tc` - Claude terminal (runs `claude`)
+- `<leader>tg` - Switch to Git terminal session
+- `<leader>td` - Switch to Dev terminal session
+- `<leader>tt` - Switch to Test terminal session
+- `<leader>tc` - Switch to Claude terminal session (runs `claude`)
 - `<leader>ts` - Send current line/selection to terminal
 - `<leader>tK` - Kill all terminals and tmux sessions
 
@@ -44,6 +44,11 @@ The plugin will auto-setup on VimEnter if not explicitly called.
 
 ## How It Works
 
-Unlike traditional terminal plugins that create multiple floating windows or splits, pterm maintains exactly one terminal tab. When you request a new terminal (via any of the predefined commands), it closes the existing terminal tab and creates a fresh one.
+Unlike traditional terminal plugins that create multiple floating windows or splits, pterm maintains exactly one terminal tab that connects to different tmux sessions based on the context:
 
-This approach eliminates terminal clutter while providing quick access to common development tasks through the predefined terminal shortcuts.
+- **Single Terminal Tab**: Only one terminal tab exists, preventing tab clutter
+- **Multiple Tmux Sessions**: Each terminal type (git, dev, test, claude) connects to its own persistent tmux session
+- **Session Switching**: The same terminal tab seamlessly switches between different tmux sessions
+- **Session Persistence**: Tmux sessions persist even when the terminal tab is closed, allowing you to resume work
+
+This approach works similar to how Neogit manages its interface - one dedicated tab that can show different contexts while maintaining state in the background.

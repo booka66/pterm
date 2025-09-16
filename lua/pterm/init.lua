@@ -1,8 +1,8 @@
 local M = {}
 
 local terminal_tab = nil -- Only one terminal tab allowed
-local current_dir = nil
-local tmux_session = nil
+local terminal_buf = nil -- Track the terminal buffer
+local current_tmux_session = nil
 
 -- Tmux utility functions
 local tmux = {}
@@ -68,36 +68,65 @@ local function get_smart_dir()
 end
 
 local function find_terminal_tab()
-  local tabs = vim.api.nvim_list_tabpages()
-  for _, tab in ipairs(tabs) do
-    local wins = vim.api.nvim_tabpage_list_wins(tab)
+  if terminal_tab and vim.api.nvim_tabpage_is_valid(terminal_tab) then
+    local wins = vim.api.nvim_tabpage_list_wins(terminal_tab)
     for _, win in ipairs(wins) do
       local buf = vim.api.nvim_win_get_buf(win)
-      local buf_type = vim.api.nvim_buf_get_option(buf, "buftype")
-      if buf_type == "terminal" then
-        return tab, win, buf
+      if terminal_buf and buf == terminal_buf and vim.api.nvim_buf_is_valid(buf) then
+        return terminal_tab, win, buf
       end
     end
   end
   return nil, nil, nil
 end
 
-local function create_terminal_tab(dir)
-  dir = dir or get_smart_dir()
-  current_dir = dir
+local function switch_to_session(session_name)
+  if not tmux.is_available() then
+    vim.notify("tmux not available", vim.log.levels.ERROR)
+    return false
+  end
 
-  -- Create tmux session
-  local session_name = "pterm-session"
-  local use_tmux = tmux.is_available()
+  if not tmux.session_exists(session_name) then
+    local dir = get_smart_dir()
+    if not tmux.create_session(session_name, dir) then
+      vim.notify("Failed to create tmux session: " .. session_name, vim.log.levels.ERROR)
+      return false
+    end
+  end
 
-  if use_tmux then
+  -- If we have an existing terminal, send the attach command
+  local tab, win, buf = find_terminal_tab()
+  if tab and buf then
+    current_tmux_session = session_name
+    local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
+
+    -- Detach from current session and attach to new one
+    vim.api.nvim_chan_send(job_id, "\003") -- Send Ctrl-C to interrupt
+    vim.defer_fn(function()
+      local attach_cmd = "tmux attach-session -t " .. vim.fn.shellescape(session_name) .. "\r"
+      vim.api.nvim_chan_send(job_id, attach_cmd)
+    end, 50)
+
+    return true
+  else
+    -- Create new terminal tab
+    return create_terminal_tab(session_name)
+  end
+end
+
+local function create_terminal_tab(session_name)
+  session_name = session_name or "pterm-default"
+  local dir = get_smart_dir()
+
+  -- Create tmux session if it doesn't exist
+  if tmux.is_available() then
     if not tmux.session_exists(session_name) then
       if not tmux.create_session(session_name, dir) then
-        use_tmux = false
         vim.notify("Failed to create tmux session, using regular terminal", vim.log.levels.WARN)
+        session_name = nil
       end
     end
-    tmux_session = session_name
+    current_tmux_session = session_name
   end
 
   -- Create new tab
@@ -105,7 +134,7 @@ local function create_terminal_tab(dir)
   terminal_tab = vim.api.nvim_get_current_tabpage()
 
   -- Create terminal in the new tab
-  local cmd = use_tmux and ("tmux attach-session -t " .. vim.fn.shellescape(session_name)) or nil
+  local cmd = session_name and ("tmux attach-session -t " .. vim.fn.shellescape(session_name)) or nil
 
   if cmd then
     vim.cmd("terminal " .. cmd)
@@ -114,12 +143,9 @@ local function create_terminal_tab(dir)
     vim.cmd("terminal")
   end
 
+  terminal_buf = vim.api.nvim_get_current_buf()
   vim.cmd("startinsert")
-
-  -- Set tab name
-  vim.api.nvim_set_current_tabpage(terminal_tab)
-  local buf = vim.api.nvim_get_current_buf()
-  vim.api.nvim_buf_set_name(buf, "Terminal")
+  return true
 end
 
 local function switch_to_terminal_tab()
@@ -132,11 +158,9 @@ local function switch_to_terminal_tab()
 end
 
 M.toggle_terminal = function()
-  -- Check if terminal tab exists and is valid
   local tab, win, buf = find_terminal_tab()
 
   if tab then
-    terminal_tab = tab
     local current_tab = vim.api.nvim_get_current_tabpage()
 
     if current_tab == tab then
@@ -157,18 +181,22 @@ M.toggle_terminal = function()
 end
 
 M.new_terminal = function(name, dir)
-  -- Close existing terminal tab if it exists
-  if terminal_tab and vim.api.nvim_tabpage_is_valid(terminal_tab) then
-    local current_tab = vim.api.nvim_get_current_tabpage()
-    vim.api.nvim_set_current_tabpage(terminal_tab)
-    vim.cmd("tabclose")
-    if current_tab ~= terminal_tab and vim.api.nvim_tabpage_is_valid(current_tab) then
-      vim.api.nvim_set_current_tabpage(current_tab)
-    end
-  end
+  local session_name = name or "pterm-default"
 
-  -- Create new terminal tab
-  create_terminal_tab(dir)
+  local tab, win, buf = find_terminal_tab()
+  if tab then
+    -- Switch to existing session
+    switch_to_session(session_name)
+    -- Switch to the terminal tab
+    vim.api.nvim_set_current_tabpage(terminal_tab)
+    if win then
+      vim.api.nvim_set_current_win(win)
+    end
+    vim.cmd("startinsert")
+  else
+    -- Create new terminal tab
+    create_terminal_tab(session_name)
+  end
 end
 
 M.close_terminal = function()
@@ -188,6 +216,8 @@ M.close_terminal = function()
       vim.api.nvim_set_current_tabpage(current_tab)
     end
     terminal_tab = nil
+    terminal_buf = nil
+    current_tmux_session = nil
   end
 end
 
@@ -202,20 +232,20 @@ M.send_line_to_terminal = function()
 
   local line = vim.fn.getline(".")
 
-  if tmux_session and tmux.is_available() then
+  if current_tmux_session and tmux.is_available() then
     -- Send to tmux session
-    local cmd = "tmux send-keys -t " .. vim.fn.shellescape(tmux_session) .. " " .. vim.fn.shellescape(line) .. " Enter"
+    local cmd = "tmux send-keys -t " .. vim.fn.shellescape(current_tmux_session) .. " " .. vim.fn.shellescape(line) .. " Enter"
     vim.fn.system(cmd)
   else
     -- Send to regular terminal
-    local current_tab = vim.api.nvim_get_current_tabpage()
+    local current_tab_page = vim.api.nvim_get_current_tabpage()
     vim.api.nvim_set_current_tabpage(tab)
     vim.api.nvim_set_current_win(win)
 
     local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
     vim.api.nvim_chan_send(job_id, line .. "\r")
 
-    vim.api.nvim_set_current_tabpage(current_tab)
+    vim.api.nvim_set_current_tabpage(current_tab_page)
   end
 end
 
@@ -241,111 +271,43 @@ M.send_selection_to_terminal = function()
 
   local text = table.concat(lines, "\n")
 
-  if tmux_session and tmux.is_available() then
+  if current_tmux_session and tmux.is_available() then
     -- Send to tmux session
-    local cmd = "tmux send-keys -t " .. vim.fn.shellescape(tmux_session) .. " " .. vim.fn.shellescape(text) .. " Enter"
+    local cmd = "tmux send-keys -t " .. vim.fn.shellescape(current_tmux_session) .. " " .. vim.fn.shellescape(text) .. " Enter"
     vim.fn.system(cmd)
   else
     -- Send to regular terminal
-    local current_tab = vim.api.nvim_get_current_tabpage()
+    local current_tab_page = vim.api.nvim_get_current_tabpage()
     vim.api.nvim_set_current_tabpage(tab)
     vim.api.nvim_set_current_win(win)
 
     local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
     vim.api.nvim_chan_send(job_id, text .. "\r")
 
-    vim.api.nvim_set_current_tabpage(current_tab)
+    vim.api.nvim_set_current_tabpage(current_tab_page)
   end
 end
 
 -- Predefined terminal functions
 M.create_git_terminal = function()
-  M.close_terminal() -- Close existing terminal first
-  create_terminal_tab()
-
-  -- Switch to terminal and send git status
-  vim.defer_fn(function()
-    if tmux_session and tmux.is_available() then
-      local cmd = "tmux send-keys -t " .. vim.fn.shellescape(tmux_session) .. " 'git status' Enter"
-      vim.fn.system(cmd)
-    else
-      local tab, win, buf = find_terminal_tab()
-      if buf then
-        local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
-        vim.api.nvim_chan_send(job_id, "git status\r")
-      end
-    end
-  end, 100)
+  M.new_terminal("pterm-git")
 end
 
 M.create_dev_terminal = function()
-  M.close_terminal() -- Close existing terminal first
-  create_terminal_tab()
-
-  -- Try to detect and run dev server
-  vim.defer_fn(function()
-    local cwd = current_dir or get_smart_dir()
-    local cmd = nil
-
-    if vim.fn.filereadable(cwd .. "/package.json") == 1 then
-      cmd = "npm run dev"
-    elseif vim.fn.filereadable(cwd .. "/Cargo.toml") == 1 then
-      cmd = "cargo run"
-    else
-      cmd = "echo 'No dev command detected. Run your dev server manually.'"
-    end
-
-    if tmux_session and tmux.is_available() then
-      local tmux_cmd = "tmux send-keys -t " .. vim.fn.shellescape(tmux_session) .. " " .. vim.fn.shellescape(cmd) .. " Enter"
-      vim.fn.system(tmux_cmd)
-    else
-      local tab, win, buf = find_terminal_tab()
-      if buf then
-        local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
-        vim.api.nvim_chan_send(job_id, cmd .. "\r")
-      end
-    end
-  end, 100)
+  M.new_terminal("pterm-dev")
 end
 
 M.create_test_terminal = function()
-  M.close_terminal() -- Close existing terminal first
-  create_terminal_tab()
-
-  -- Try to detect and run tests
-  vim.defer_fn(function()
-    local cwd = current_dir or get_smart_dir()
-    local cmd = nil
-
-    if vim.fn.filereadable(cwd .. "/package.json") == 1 then
-      cmd = "npm test"
-    elseif vim.fn.filereadable(cwd .. "/Cargo.toml") == 1 then
-      cmd = "cargo test"
-    else
-      cmd = "echo 'No test command detected. Run your tests manually.'"
-    end
-
-    if tmux_session and tmux.is_available() then
-      local tmux_cmd = "tmux send-keys -t " .. vim.fn.shellescape(tmux_session) .. " " .. vim.fn.shellescape(cmd) .. " Enter"
-      vim.fn.system(tmux_cmd)
-    else
-      local tab, win, buf = find_terminal_tab()
-      if buf then
-        local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
-        vim.api.nvim_chan_send(job_id, cmd .. "\r")
-      end
-    end
-  end, 100)
+  M.new_terminal("pterm-test")
 end
 
 M.create_claude_terminal = function()
-  M.close_terminal() -- Close existing terminal first
-  create_terminal_tab()
+  M.new_terminal("pterm-claude")
 
   -- Send claude command
   vim.defer_fn(function()
-    if tmux_session and tmux.is_available() then
-      local cmd = "tmux send-keys -t " .. vim.fn.shellescape(tmux_session) .. " 'claude' Enter"
+    if current_tmux_session and tmux.is_available() then
+      local cmd = "tmux send-keys -t " .. vim.fn.shellescape(current_tmux_session) .. " 'claude' Enter"
       vim.fn.system(cmd)
     else
       local tab, win, buf = find_terminal_tab()
@@ -361,22 +323,35 @@ M.kill_all_terminals = function()
   -- Close terminal tab
   M.close_terminal()
 
-  -- Kill tmux session if it exists
-  if tmux_session and tmux.is_available() then
-    tmux.kill_session(tmux_session)
-    print("Terminal tab and tmux session killed")
+  -- Kill all pterm tmux sessions
+  if tmux.is_available() then
+    local all_sessions = tmux.list_sessions()
+    local killed_count = 0
+
+    for _, session in ipairs(all_sessions) do
+      if session:match("^pterm%-") then
+        if tmux.kill_session(session) then
+          killed_count = killed_count + 1
+        end
+      end
+    end
+
+    if killed_count > 0 then
+      print("Terminal tab and " .. killed_count .. " pterm tmux sessions killed")
+    else
+      print("Terminal tab killed (no pterm tmux sessions found)")
+    end
   else
     print("Terminal tab killed")
   end
-
-  tmux_session = nil
 end
 
 M.terminal_info = function()
   local tab, win, buf = find_terminal_tab()
   if tab then
-    local session_info = tmux_session and (" [tmux: " .. tmux_session .. "]") or ""
-    print("Terminal tab exists" .. session_info .. " (dir: " .. (current_dir or "unknown") .. ")")
+    local session_info = current_tmux_session and (" [tmux: " .. current_tmux_session .. "]") or ""
+    local dir = get_smart_dir()
+    print("Terminal tab exists" .. session_info .. " (dir: " .. dir .. ")")
   else
     print("No terminal tab")
   end
