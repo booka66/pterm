@@ -1,8 +1,9 @@
 local M = {}
 
-local terminal_tab = nil -- Only one terminal tab allowed
 local terminal_buf = nil -- Track the terminal buffer
+local original_win_config = {} -- Store original window layout
 local current_tmux_session = nil
+local is_terminal_visible = false
 
 -- Tmux utility functions
 local tmux = {}
@@ -67,17 +68,92 @@ local function get_smart_dir()
   return vim.fn.expand("~")
 end
 
-local function find_terminal_tab()
-  if terminal_tab and vim.api.nvim_tabpage_is_valid(terminal_tab) then
-    local wins = vim.api.nvim_tabpage_list_wins(terminal_tab)
-    for _, win in ipairs(wins) do
-      local buf = vim.api.nvim_win_get_buf(win)
-      if terminal_buf and buf == terminal_buf and vim.api.nvim_buf_is_valid(buf) then
-        return terminal_tab, win, buf
-      end
+local function save_window_layout()
+  original_win_config = {
+    wins = {},
+    current_win = vim.api.nvim_get_current_win()
+  }
+
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    original_win_config.wins[win] = {
+      buf = buf,
+      width = vim.api.nvim_win_get_width(win),
+      height = vim.api.nvim_win_get_height(win),
+      row = vim.api.nvim_win_get_position(win)[1],
+      col = vim.api.nvim_win_get_position(win)[2]
+    }
+  end
+end
+
+local function hide_terminal()
+  if not is_terminal_visible then return end
+
+  is_terminal_visible = false
+
+  -- Close all windows except original ones
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    if terminal_buf and buf == terminal_buf then
+      vim.api.nvim_win_close(win, false)
+      break
     end
   end
-  return nil, nil, nil
+
+  -- Restore focus to original window if it still exists
+  if original_win_config.current_win and vim.api.nvim_win_is_valid(original_win_config.current_win) then
+    vim.api.nvim_set_current_win(original_win_config.current_win)
+  end
+end
+
+local function show_terminal()
+  if is_terminal_visible then return end
+
+  save_window_layout()
+  is_terminal_visible = true
+
+  -- Create terminal buffer if it doesn't exist
+  if not terminal_buf or not vim.api.nvim_buf_is_valid(terminal_buf) then
+    create_terminal_buffer()
+  end
+
+  -- Hide all current windows by creating a single fullscreen window
+  vim.cmd("only") -- Close all other windows
+
+  -- Create new window for terminal
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(win, terminal_buf)
+  vim.cmd("startinsert")
+end
+
+local function create_terminal_buffer(session_name)
+  session_name = session_name or "pterm-default"
+  local dir = get_smart_dir()
+
+  -- Create tmux session if it doesn't exist
+  if tmux.is_available() then
+    if not tmux.session_exists(session_name) then
+      if not tmux.create_session(session_name, dir) then
+        vim.notify("Failed to create tmux session, using regular terminal", vim.log.levels.WARN)
+        session_name = nil
+      end
+    end
+    current_tmux_session = session_name
+  end
+
+  -- Create terminal buffer
+  terminal_buf = vim.api.nvim_create_buf(false, true)
+
+  -- Set buffer options
+  vim.api.nvim_buf_set_option(terminal_buf, "buftype", "terminal")
+  vim.api.nvim_buf_set_option(terminal_buf, "bufhidden", "hide")
+
+  -- Start terminal
+  local cmd = session_name and ("tmux attach-session -t " .. vim.fn.shellescape(session_name)) or vim.o.shell
+
+  vim.api.nvim_call_function("termopen", {cmd, {}})
+
+  return terminal_buf
 end
 
 local function switch_to_session(session_name)
@@ -95,10 +171,9 @@ local function switch_to_session(session_name)
   end
 
   -- If we have an existing terminal, send the attach command
-  local tab, win, buf = find_terminal_tab()
-  if tab and buf then
+  if terminal_buf and vim.api.nvim_buf_is_valid(terminal_buf) then
     current_tmux_session = session_name
-    local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
+    local job_id = vim.api.nvim_buf_get_var(terminal_buf, "terminal_job_id")
 
     -- Detach from current session and attach to new one
     vim.api.nvim_chan_send(job_id, "\003") -- Send Ctrl-C to interrupt
@@ -109,126 +184,49 @@ local function switch_to_session(session_name)
 
     return true
   else
-    -- Create new terminal tab
-    return create_terminal_tab(session_name)
-  end
-end
-
-local function create_terminal_tab(session_name)
-  session_name = session_name or "pterm-default"
-  local dir = get_smart_dir()
-
-  -- Create tmux session if it doesn't exist
-  if tmux.is_available() then
-    if not tmux.session_exists(session_name) then
-      if not tmux.create_session(session_name, dir) then
-        vim.notify("Failed to create tmux session, using regular terminal", vim.log.levels.WARN)
-        session_name = nil
-      end
-    end
-    current_tmux_session = session_name
-  end
-
-  -- Create new tab
-  vim.cmd("tabnew")
-  terminal_tab = vim.api.nvim_get_current_tabpage()
-
-  -- Create terminal in the new tab
-  local cmd = session_name and ("tmux attach-session -t " .. vim.fn.shellescape(session_name)) or nil
-
-  if cmd then
-    vim.cmd("terminal " .. cmd)
-  else
-    vim.cmd("lcd " .. vim.fn.fnameescape(dir))
-    vim.cmd("terminal")
-  end
-
-  terminal_buf = vim.api.nvim_get_current_buf()
-  vim.cmd("startinsert")
-  return true
-end
-
-local function switch_to_terminal_tab()
-  if terminal_tab and vim.api.nvim_tabpage_is_valid(terminal_tab) then
-    vim.api.nvim_set_current_tabpage(terminal_tab)
-    vim.cmd("startinsert")
+    -- Create new terminal buffer
+    create_terminal_buffer(session_name)
     return true
   end
-  return false
 end
 
 M.toggle_terminal = function()
-  local tab, win, buf = find_terminal_tab()
-
-  if tab then
-    local current_tab = vim.api.nvim_get_current_tabpage()
-
-    if current_tab == tab then
-      -- We're in the terminal tab, delete it
-      M.close_terminal()
-    else
-      -- Switch to terminal tab
-      vim.api.nvim_set_current_tabpage(tab)
-      if win then
-        vim.api.nvim_set_current_win(win)
-      end
-      vim.cmd("startinsert")
-    end
+  if is_terminal_visible then
+    hide_terminal()
   else
-    -- No terminal tab exists, create one
-    create_terminal_tab()
+    show_terminal()
   end
 end
 
 M.new_terminal = function(name, dir)
   local session_name = name or "pterm-default"
 
-  local tab, win, buf = find_terminal_tab()
-  if tab then
-    -- Switch to existing session
-    switch_to_session(session_name)
-    -- Switch to the terminal tab
-    vim.api.nvim_set_current_tabpage(terminal_tab)
-    if win then
-      vim.api.nvim_set_current_win(win)
-    end
-    vim.cmd("startinsert")
-  else
-    -- Create new terminal tab
-    create_terminal_tab(session_name)
+  -- Switch to or create the session
+  switch_to_session(session_name)
+
+  -- Show terminal if not visible
+  if not is_terminal_visible then
+    show_terminal()
   end
 end
 
 M.close_terminal = function()
-  if terminal_tab and vim.api.nvim_tabpage_is_valid(terminal_tab) then
-    local current_tab = vim.api.nvim_get_current_tabpage()
-    if current_tab == terminal_tab then
-      -- We're in the terminal tab
-      if vim.fn.tabpagenr('$') > 1 then
-        vim.cmd("tabclose")
-      else
-        vim.cmd("enew") -- Don't close if it's the only tab
-      end
-    else
-      -- Close terminal tab from another tab
-      vim.api.nvim_set_current_tabpage(terminal_tab)
-      vim.cmd("tabclose")
-      vim.api.nvim_set_current_tabpage(current_tab)
-    end
-    terminal_tab = nil
+  if is_terminal_visible then
+    hide_terminal()
+  end
+
+  -- Optionally destroy terminal buffer completely
+  if terminal_buf and vim.api.nvim_buf_is_valid(terminal_buf) then
+    vim.api.nvim_buf_delete(terminal_buf, { force = true })
     terminal_buf = nil
     current_tmux_session = nil
   end
 end
 
 M.send_line_to_terminal = function()
-  local tab, win, buf = find_terminal_tab()
-  if not tab then
-    create_terminal_tab()
-    tab, win, buf = find_terminal_tab()
+  if not terminal_buf or not vim.api.nvim_buf_is_valid(terminal_buf) then
+    show_terminal()
   end
-
-  if not tab then return end
 
   local line = vim.fn.getline(".")
 
@@ -238,25 +236,15 @@ M.send_line_to_terminal = function()
     vim.fn.system(cmd)
   else
     -- Send to regular terminal
-    local current_tab_page = vim.api.nvim_get_current_tabpage()
-    vim.api.nvim_set_current_tabpage(tab)
-    vim.api.nvim_set_current_win(win)
-
-    local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
+    local job_id = vim.api.nvim_buf_get_var(terminal_buf, "terminal_job_id")
     vim.api.nvim_chan_send(job_id, line .. "\r")
-
-    vim.api.nvim_set_current_tabpage(current_tab_page)
   end
 end
 
 M.send_selection_to_terminal = function()
-  local tab, win, buf = find_terminal_tab()
-  if not tab then
-    create_terminal_tab()
-    tab, win, buf = find_terminal_tab()
+  if not terminal_buf or not vim.api.nvim_buf_is_valid(terminal_buf) then
+    show_terminal()
   end
-
-  if not tab then return end
 
   local start_pos = vim.fn.getpos("'<")
   local end_pos = vim.fn.getpos("'>")
@@ -277,14 +265,8 @@ M.send_selection_to_terminal = function()
     vim.fn.system(cmd)
   else
     -- Send to regular terminal
-    local current_tab_page = vim.api.nvim_get_current_tabpage()
-    vim.api.nvim_set_current_tabpage(tab)
-    vim.api.nvim_set_current_win(win)
-
-    local job_id = vim.api.nvim_buf_get_var(buf, "terminal_job_id")
+    local job_id = vim.api.nvim_buf_get_var(terminal_buf, "terminal_job_id")
     vim.api.nvim_chan_send(job_id, text .. "\r")
-
-    vim.api.nvim_set_current_tabpage(current_tab_page)
   end
 end
 
@@ -347,13 +329,13 @@ M.kill_all_terminals = function()
 end
 
 M.terminal_info = function()
-  local tab, win, buf = find_terminal_tab()
-  if tab then
+  if terminal_buf and vim.api.nvim_buf_is_valid(terminal_buf) then
     local session_info = current_tmux_session and (" [tmux: " .. current_tmux_session .. "]") or ""
     local dir = get_smart_dir()
-    print("Terminal tab exists" .. session_info .. " (dir: " .. dir .. ")")
+    local visible = is_terminal_visible and " (visible)" or " (hidden)"
+    print("Terminal exists" .. session_info .. visible .. " (dir: " .. dir .. ")")
   else
-    print("No terminal tab")
+    print("No terminal")
   end
 end
 
