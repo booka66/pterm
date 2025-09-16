@@ -856,18 +856,35 @@ M.setup = function(opts)
         vim.defer_fn(function()
           if term:is_open() then
             if term.use_zellij and term.zellij_session then
-              -- Write to temporary file to avoid shell escaping issues
-              local temp_file = vim.fn.tempname()
-              local file = io.open(temp_file, "w")
-              if file then
-                file:write(sanitized)
-                file:close()
-                -- Use zellij to read from file
-                vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars \"$(cat " .. vim.fn.shellescape(temp_file) .. ")\"")
-                vim.fn.delete(temp_file)
+              -- For zellij, send smaller chunks to avoid issues
+              local chunk_size = 1000
+              local session_name = term.zellij_session
+
+              if #sanitized <= chunk_size then
+                -- Small content, send directly with proper escaping
+                local escaped = sanitized:gsub("'", "'\"'\"'")  -- Escape single quotes
+                local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
+                local result = vim.fn.system(cmd)
+                if vim.v.shell_error ~= 0 then
+                  term:send(sanitized)
+                end
               else
-                -- Fallback to regular send
-                term:send(sanitized)
+                -- Large content, send in chunks
+                for i = 1, #sanitized, chunk_size do
+                  local chunk = sanitized:sub(i, i + chunk_size - 1)
+                  local escaped = chunk:gsub("'", "'\"'\"'")  -- Escape single quotes
+                  local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
+                  local result = vim.fn.system(cmd)
+                  if vim.v.shell_error ~= 0 then
+                    -- If any chunk fails, fallback to regular terminal for remaining content
+                    term:send(sanitized:sub(i))
+                    break
+                  end
+                  -- Small delay between chunks to avoid overwhelming zellij
+                  if i + chunk_size < #sanitized then
+                    vim.fn.system("sleep 0.01")
+                  end
+                end
               end
             else
               term:send(sanitized)
@@ -876,22 +893,35 @@ M.setup = function(opts)
         end, 100)
       else
         if term.use_zellij and term.zellij_session then
-          -- Write to temporary file to avoid shell escaping issues
-          local temp_file = vim.fn.tempname()
-          local file = io.open(temp_file, "w")
-          if file then
-            file:write(sanitized)
-            file:close()
-            -- Use zellij to read from file
-            local success = vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars \"$(cat " .. vim.fn.shellescape(temp_file) .. ")\"")
-            vim.fn.delete(temp_file)
-            -- If zellij fails, fallback to regular terminal
+          -- For zellij, send smaller chunks to avoid issues
+          local chunk_size = 1000
+          local session_name = term.zellij_session
+
+          if #sanitized <= chunk_size then
+            -- Small content, send directly with proper escaping
+            local escaped = sanitized:gsub("'", "'\"'\"'")  -- Escape single quotes
+            local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
+            local result = vim.fn.system(cmd)
             if vim.v.shell_error ~= 0 then
               term:send(sanitized)
             end
           else
-            -- Fallback to regular send
-            term:send(sanitized)
+            -- Large content, send in chunks
+            for i = 1, #sanitized, chunk_size do
+              local chunk = sanitized:sub(i, i + chunk_size - 1)
+              local escaped = chunk:gsub("'", "'\"'\"'")  -- Escape single quotes
+              local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
+              local result = vim.fn.system(cmd)
+              if vim.v.shell_error ~= 0 then
+                -- If any chunk fails, fallback to regular terminal for remaining content
+                term:send(sanitized:sub(i))
+                break
+              end
+              -- Small delay between chunks to avoid overwhelming zellij
+              if i + chunk_size < #sanitized then
+                vim.fn.system("sleep 0.01")
+              end
+            end
           end
         else
           term:send(sanitized)
