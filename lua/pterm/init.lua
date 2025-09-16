@@ -6,50 +6,70 @@ local current_term = 1
 local terminal_names = {}
 local terminal_scroll_positions = {}
 
--- Zellij utility functions
-local zellij = {}
+-- Abduco utility functions
+local abduco = {}
 
-function zellij.is_available()
-  return vim.fn.executable("zellij") == 1
+function abduco.is_available()
+  return vim.fn.executable("abduco") == 1
 end
 
-function zellij.session_exists(session_name)
-  if not zellij.is_available() then return false end
-  local result = vim.fn.system("zellij list-sessions --short 2>/dev/null | grep -q " .. vim.fn.shellescape("^" .. session_name .. "$"))
+function abduco.session_exists(session_name)
+  if not abduco.is_available() then return false end
+  local result = vim.fn.system("abduco -l 2>/dev/null | grep -q " .. vim.fn.shellescape("^" .. session_name .. " "))
   return vim.v.shell_error == 0
 end
 
-function zellij.create_session(session_name, start_dir)
-  if not zellij.is_available() then return false end
-  local cmd = "zellij -s " .. vim.fn.shellescape(session_name) .. " options --default-cwd " .. vim.fn.shellescape(start_dir or vim.fn.getcwd()) .. " 2>/dev/null &"
-  vim.fn.system(cmd)
-  -- Give zellij a moment to start up
-  vim.fn.system("sleep 0.5")
-  return zellij.session_exists(session_name)
+function abduco.create_session(session_name, start_dir)
+  if not abduco.is_available() then return false end
+  -- abduco doesn't support setting working directory directly, we'll handle it in the shell command
+  return true
 end
 
-function zellij.kill_session(session_name)
-  if not zellij.is_available() then return false end
-  vim.fn.system("zellij delete-session " .. vim.fn.shellescape(session_name) .. " --force 2>/dev/null")
-  return vim.v.shell_error == 0
+function abduco.kill_session(session_name)
+  if not abduco.is_available() then return false end
+  -- Find and kill the session
+  local pid_output = vim.fn.system("abduco -l 2>/dev/null | grep " .. vim.fn.shellescape("^" .. session_name .. " ") .. " | awk '{print $2}'")
+  if vim.v.shell_error == 0 and pid_output ~= "" then
+    local pid = vim.fn.trim(pid_output)
+    vim.fn.system("kill " .. pid .. " 2>/dev/null")
+    return vim.v.shell_error == 0
+  end
+  return false
 end
 
-function zellij.list_sessions()
-  if not zellij.is_available() then return {} end
-  local output = vim.fn.system("zellij list-sessions --short 2>/dev/null")
+function abduco.list_sessions()
+  if not abduco.is_available() then return {} end
+  local output = vim.fn.system("abduco -l 2>/dev/null")
   if vim.v.shell_error ~= 0 then return {} end
   local sessions = {}
-  for session in output:gmatch("[^\r\n]+") do
-    if session ~= "" then
+  for line in output:gmatch("[^\r\n]+") do
+    local session = line:match("^([^%s]+)")
+    if session and session ~= "" then
       table.insert(sessions, session)
     end
   end
   return sessions
 end
 
-function zellij.attach_session(session_name)
-  if not zellij.is_available() then return false end
-  return "zellij attach " .. vim.fn.shellescape(session_name)
+function abduco.attach_session(session_name, start_dir)
+  if not abduco.is_available() then return false end
+  if start_dir then
+    -- Create a shell command that changes directory before attaching
+    return "cd " .. vim.fn.shellescape(start_dir) .. " && abduco -a " .. vim.fn.shellescape(session_name)
+  else
+    return "abduco -a " .. vim.fn.shellescape(session_name)
+  end
+end
+
+function abduco.create_and_attach_session(session_name, start_dir)
+  if not abduco.is_available() then return false end
+  local shell_cmd = vim.o.shell
+  if start_dir then
+    -- Create session with shell that starts in the right directory
+    return "cd " .. vim.fn.shellescape(start_dir) .. " && abduco -c " .. vim.fn.shellescape(session_name) .. " " .. shell_cmd
+  else
+    return "abduco -c " .. vim.fn.shellescape(session_name) .. " " .. shell_cmd
+  end
 end
 
 local function save_scroll_position(term)
@@ -180,7 +200,7 @@ local function new_terminal(name, dir)
   local terminal_dir = dir or get_smart_dir()
   local terminal_name = name or ("Terminal " .. term_count)
 
-  -- Create zellij session name with consistent naming
+  -- Create abduco session name with consistent naming
   local session_name
   if name then
     local clean_name = name:lower():gsub("[%s%-]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
@@ -189,30 +209,26 @@ local function new_terminal(name, dir)
     session_name = "pterm-term-" .. term_count
   end
 
-  -- Check if we should use zellij or fall back to regular terminal
-  local use_zellij = zellij.is_available()
-
-  if use_zellij then
-    -- Create or attach to zellij session
-    if not zellij.session_exists(session_name) then
-      if not zellij.create_session(session_name, terminal_dir) then
-        use_zellij = false
-        vim.notify("Failed to create zellij session, falling back to regular terminal", vim.log.levels.WARN)
-      end
-    end
-  end
+  -- Check if we should use abduco or fall back to regular terminal
+  local use_abduco = abduco.is_available()
 
   local Terminal = require("toggleterm.terminal").Terminal
   local cmd = nil
 
-  if use_zellij then
-    cmd = zellij.attach_session(session_name)
+  if use_abduco then
+    if abduco.session_exists(session_name) then
+      -- Attach to existing session
+      cmd = abduco.attach_session(session_name, terminal_dir)
+    else
+      -- Create new session
+      cmd = abduco.create_and_attach_session(session_name, terminal_dir)
+    end
   end
 
   local new_term = Terminal:new({
     count = term_count,
     direction = "float",
-    dir = use_zellij and nil or terminal_dir,
+    dir = use_abduco and nil or terminal_dir,
     cmd = cmd,
     float_opts = {
       border = "none",
@@ -238,8 +254,8 @@ local function new_terminal(name, dir)
   })
 
   -- Store session info
-  new_term.zellij_session = use_zellij and session_name or nil
-  new_term.use_zellij = use_zellij
+  new_term.abduco_session = use_abduco and session_name or nil
+  new_term.use_abduco = use_abduco
 
   table.insert(terminals, new_term)
   terminal_names[term_count] = terminal_name
@@ -250,10 +266,10 @@ end
 local function create_predefined_terminal(name)
   local idx, term = find_terminal_by_name(name)
 
-  -- Check if zellij session exists even if we don't have a terminal object for it
+  -- Check if abduco session exists even if we don't have a terminal object for it
   local clean_name = name:lower():gsub("[%s%-]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
   local session_name = "pterm-" .. clean_name
-  local use_zellij = zellij.is_available()
+  local use_abduco = abduco.is_available()
 
   if term then
     -- Terminal object exists, toggle it
@@ -266,11 +282,11 @@ local function create_predefined_terminal(name)
       vim.cmd("startinsert")
       restore_scroll_position(term)
     end
-  elseif use_zellij and zellij.session_exists(session_name) then
-    -- Zellij session exists but no terminal object, create terminal that attaches to existing session
+  elseif use_abduco and abduco.session_exists(session_name) then
+    -- Abduco session exists but no terminal object, create terminal that attaches to existing session
     new_terminal(name, get_smart_dir())
   else
-    -- Create new terminal (and session if using zellij)
+    -- Create new terminal (and session if using abduco)
     new_terminal(name, get_smart_dir())
   end
 end
@@ -292,7 +308,7 @@ M.create_claude_terminal = function()
   local idx, term = find_terminal_by_name(name)
   local clean_name = name:lower():gsub("[%s%-]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
   local session_name = "pterm-" .. clean_name
-  local use_zellij = zellij.is_available()
+  local use_abduco = abduco.is_available()
   local should_send_command = false
 
   if term then
@@ -306,28 +322,21 @@ M.create_claude_terminal = function()
       vim.cmd("startinsert")
       restore_scroll_position(term)
     end
-  elseif use_zellij and zellij.session_exists(session_name) then
-    -- Zellij session exists but no terminal object, create terminal that attaches to existing session
+  elseif use_abduco and abduco.session_exists(session_name) then
+    -- Abduco session exists but no terminal object, create terminal that attaches to existing session
     new_terminal(name, get_smart_dir())
   else
-    -- Create new terminal (and session if using zellij)
+    -- Create new terminal (and session if using abduco)
     should_send_command = true
     new_terminal(name, get_smart_dir())
   end
 
   -- Send claude command only if we created a brand new terminal/session
+  -- Note: abduco doesn't support sending commands like zellij, so we use regular terminal send
   if should_send_command then
     vim.defer_fn(function()
       if #terminals > 0 and terminals[current_term] then
-        if terminals[current_term].use_zellij then
-          -- Send command to zellij session
-          local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars 'claude'"
-          vim.fn.system(cmd)
-          vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write 13") -- Enter key
-        else
-          -- Send to regular terminal
-          terminals[current_term]:send("claude")
-        end
+        terminals[current_term]:send("claude")
       end
     end, 100)
   end
@@ -473,12 +482,12 @@ M.close_current_terminal = function()
 
   if terminals[current_term] then
     local old_count = terminals[current_term].count
-    local session_name = terminals[current_term].zellij_session
+    local session_name = terminals[current_term].abduco_session
 
     terminals[current_term]:close()
 
-    -- Note: We keep zellij sessions running for persistence
-    -- Users can manually kill sessions with :lua require('pterm').kill_zellij_session('session-name')
+    -- Note: We keep abduco sessions running for persistence
+    -- Users can manually kill sessions with :lua require('pterm').kill_abduco_session('session-name')
 
     table.remove(terminals, current_term)
     if terminal_names[old_count] then
@@ -516,8 +525,8 @@ M.show_terminal_info = function()
     local name = terminal_names[term.count] or "Terminal " .. i
     local current_marker = (i == current_term) and " (current)" or ""
     local session_info = ""
-    if term.use_zellij and term.zellij_session then
-      session_info = " [zellij: " .. term.zellij_session .. "]"
+    if term.use_abduco and term.abduco_session then
+      session_info = " [abduco: " .. term.abduco_session .. "]"
     end
     info = info .. "  " .. i .. ": " .. name .. current_marker .. session_info .. "\n"
   end
@@ -532,15 +541,8 @@ M.send_line_to_terminal = function()
   local line = vim.fn.getline(".")
   local term = terminals[current_term]
 
-  if term.use_zellij and term.zellij_session then
-    -- Send to zellij session
-    local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(line)
-    vim.fn.system(cmd)
-    vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write 13") -- Enter key
-  else
-    -- Send to regular terminal
-    term:send(line .. "\r")
-  end
+  -- Send to terminal (abduco sessions are handled through regular terminal interface)
+  term:send(line .. "\r")
 
   if not term:is_open() then
     term:toggle()
@@ -567,15 +569,8 @@ M.send_selection_to_terminal = function()
   local text = table.concat(lines, "\n")
   local term = terminals[current_term]
 
-  if term.use_zellij and term.zellij_session then
-    -- Send to zellij session
-    local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(text)
-    vim.fn.system(cmd)
-    vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write 13") -- Enter key
-  else
-    -- Send to regular terminal
-    term:send(text .. "\r")
-  end
+  -- Send to terminal (abduco sessions are handled through regular terminal interface)
+  term:send(text .. "\r")
 
   if not term:is_open() then
     term:toggle()
@@ -631,51 +626,51 @@ M.kill_all_terminals = function()
   current_term = 1
   term_count = 0
 
-  -- Kill all pterm zellij sessions
-  if zellij.is_available() then
-    local all_sessions = zellij.list_sessions()
+  -- Kill all pterm abduco sessions
+  if abduco.is_available() then
+    local all_sessions = abduco.list_sessions()
     local killed_count = 0
 
     for _, session in ipairs(all_sessions) do
       if session:match("^pterm%-") then
-        if zellij.kill_session(session) then
+        if abduco.kill_session(session) then
           killed_count = killed_count + 1
         end
       end
     end
 
     if killed_count > 0 then
-      print("All terminals and " .. killed_count .. " zellij sessions killed")
+      print("All terminals and " .. killed_count .. " abduco sessions killed")
     else
-      print("All terminals killed (no zellij sessions found)")
+      print("All terminals killed (no abduco sessions found)")
     end
   else
     print("All terminals killed")
   end
 end
 
--- Utility function to kill a specific zellij session
-M.kill_zellij_session = function(session_name)
-  if zellij.is_available() then
-    local success = zellij.kill_session(session_name)
+-- Utility function to kill a specific abduco session
+M.kill_abduco_session = function(session_name)
+  if abduco.is_available() then
+    local success = abduco.kill_session(session_name)
     if success then
-      print("Killed zellij session: " .. session_name)
+      print("Killed abduco session: " .. session_name)
     else
-      print("Failed to kill zellij session: " .. session_name)
+      print("Failed to kill abduco session: " .. session_name)
     end
   else
-    print("zellij not available")
+    print("abduco not available")
   end
 end
 
--- Utility function to list all pterm zellij sessions
-M.list_zellij_sessions = function()
-  if not zellij.is_available() then
-    print("zellij not available")
+-- Utility function to list all pterm abduco sessions
+M.list_abduco_sessions = function()
+  if not abduco.is_available() then
+    print("abduco not available")
     return
   end
 
-  local all_sessions = zellij.list_sessions()
+  local all_sessions = abduco.list_sessions()
   local pterm_sessions = {}
 
   for _, session in ipairs(all_sessions) do
@@ -685,37 +680,37 @@ M.list_zellij_sessions = function()
   end
 
   if #pterm_sessions == 0 then
-    print("No pterm zellij sessions found")
+    print("No pterm abduco sessions found")
   else
-    print("Pterm zellij sessions:")
+    print("Pterm abduco sessions:")
     for _, session in ipairs(pterm_sessions) do
       print("  " .. session)
     end
   end
 end
 
--- Kill all pterm zellij sessions
-M.kill_all_zellij_sessions = function()
-  if not zellij.is_available() then
-    print("zellij not available")
+-- Kill all pterm abduco sessions
+M.kill_all_abduco_sessions = function()
+  if not abduco.is_available() then
+    print("abduco not available")
     return
   end
 
-  local all_sessions = zellij.list_sessions()
+  local all_sessions = abduco.list_sessions()
   local killed_count = 0
 
   for _, session in ipairs(all_sessions) do
     if session:match("^pterm%-") then
-      if zellij.kill_session(session) then
+      if abduco.kill_session(session) then
         killed_count = killed_count + 1
       end
     end
   end
 
   if killed_count > 0 then
-    print("Killed " .. killed_count .. " pterm zellij sessions")
+    print("Killed " .. killed_count .. " pterm abduco sessions")
   else
-    print("No pterm zellij sessions to kill")
+    print("No pterm abduco sessions to kill")
   end
 end
 
@@ -885,7 +880,7 @@ M.setup = function(opts)
   map("n", "<leader>tn", M.rename_terminal, { desc = "Rename terminal" })
   map("n", "<leader>tK", M.kill_all_terminals, { desc = "Kill all terminals" })
   map("n", "<leader>tp", M.pick_terminal, { desc = "Pick terminal" })
-  map("n", "<leader>tX", M.kill_all_zellij_sessions, { desc = "Kill all zellij sessions" })
+  map("n", "<leader>tX", M.kill_all_abduco_sessions, { desc = "Kill all abduco sessions" })
 end
 
 return M
