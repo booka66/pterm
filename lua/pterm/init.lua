@@ -15,7 +15,9 @@ end
 
 function abduco.session_exists(session_name)
   if not abduco.is_available() then return false end
-  local result = vim.fn.system("abduco -l 2>/dev/null | grep -q " .. vim.fn.shellescape("^" .. session_name .. " "))
+  -- abduco -l format: "  Day Date Time session-name"
+  -- We need to match the session name at the end of the line
+  local result = vim.fn.system("abduco -l 2>/dev/null | grep -q " .. vim.fn.shellescape("\\s" .. session_name .. "$"))
   return vim.v.shell_error == 0
 end
 
@@ -39,12 +41,11 @@ end
 
 function abduco.list_sessions()
   if not abduco.is_available() then return {} end
-  local output = vim.fn.system("abduco -l 2>/dev/null")
+  local output = vim.fn.system("abduco -l 2>/dev/null | awk '/^  [A-Z]/ {print $NF}'")
   if vim.v.shell_error ~= 0 then return {} end
   local sessions = {}
-  for line in output:gmatch("[^\r\n]+") do
-    local session = line:match("^([^%s]+)")
-    if session and session ~= "" then
+  for session in output:gmatch("[^\r\n]+") do
+    if session ~= "" then
       table.insert(sessions, session)
     end
   end
