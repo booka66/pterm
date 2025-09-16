@@ -824,22 +824,42 @@ M.setup = function(opts)
   map("t", "<D-w>", M.close_current_terminal, { desc = "Close current terminal and switch to next" })
   map("t", "<M-w>", M.close_current_terminal, { desc = "Close current terminal and switch to next" })
 
-  -- Fix paste in terminal mode
+  -- Fix paste in terminal mode with sanitization
   map("t", "<D-v>", function()
     local clipboard = vim.fn.getreg("+")
     if clipboard and clipboard ~= "" then
-      -- Send clipboard content to terminal
-      if #terminals > 0 and terminals[current_term] then
-        local term = terminals[current_term]
-        if term.use_zellij and term.zellij_session then
-          local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(clipboard)
-          vim.fn.system(cmd)
-        else
-          term:send(clipboard)
+      -- Sanitize clipboard content to prevent dangerous characters
+      local sanitized = clipboard
+        -- Remove null bytes and other control characters except common ones
+        :gsub("[\0-\8\11\12\14-\31\127]", "")
+        -- Remove escape sequences that could be dangerous
+        :gsub("\27%[%d*[A-Za-z]", "")  -- Remove ANSI escape sequences
+        :gsub("\27%]%d*;[^\7]*\7", "") -- Remove OSC sequences
+        -- Preserve common control characters
+        -- \9 (tab), \10 (LF), \13 (CR) are preserved
+
+      -- Additional safety: limit length to prevent extremely long pastes
+      if #sanitized > 10000 then
+        sanitized = sanitized:sub(1, 10000)
+        vim.notify("Clipboard content truncated to 10,000 characters for safety", vim.log.levels.WARN)
+      end
+
+      if sanitized ~= "" then
+        -- Send sanitized content to terminal
+        if #terminals > 0 and terminals[current_term] then
+          local term = terminals[current_term]
+          if term.use_zellij and term.zellij_session then
+            local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(sanitized)
+            vim.fn.system(cmd)
+          else
+            term:send(sanitized)
+          end
         end
+      else
+        vim.notify("Clipboard content contained only unsafe characters - paste cancelled", vim.log.levels.WARN)
       end
     end
-  end, { desc = "Paste in terminal" })
+  end, { desc = "Paste in terminal (sanitized)" })
 
   map("t", "<C-h>", "<C-\\><C-N><C-w>h", { desc = "Terminal left window nav" })
   map("t", "<C-j>", "<C-\\><C-N><C-w>j", { desc = "Terminal down window nav" })

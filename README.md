@@ -64,7 +64,7 @@ use {
 | `<C-w>` / `<D-w>` / `<M-w>` | t    | Close current terminal       |
 | `<C-h/j/k/l>`               | t    | Navigate to adjacent windows |
 | `<C-x>`                     | t    | Exit terminal mode           |
-| `<D-v>` / `<Cmd-v>`         | t    | Paste clipboard content      |
+| `<D-v>` / `<Cmd-v>`         | t    | Paste clipboard content (sanitized) |
 
 ### Quick Terminal Types
 
