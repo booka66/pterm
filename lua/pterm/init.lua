@@ -831,14 +831,10 @@ M.setup = function(opts)
       return
     end
 
-    -- Sanitize clipboard content to prevent dangerous characters
+    -- Minimal sanitization - only remove truly dangerous characters
     local sanitized = clipboard
-      -- Remove control characters except tab, LF, CR
-      :gsub("[\0-\8\11\12\14-\31\127]", "")
-      -- Remove escape sequences
-      :gsub("\27%[[%d;]*[A-Za-z]", "")
-      -- Remove OSC sequences
-      :gsub("\27%][^\7]*\7", "")
+      -- Remove null bytes and escape character (but preserve everything else)
+      :gsub("[\0\27]", "")
 
     -- Limit length for safety
     if #sanitized > 5000 then
