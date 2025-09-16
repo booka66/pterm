@@ -5,9 +5,11 @@ local terminals = {}
 local current_term = 1
 local terminal_names = {}
 local terminal_scroll_positions = {}
+local terminal_buffers = {} -- Store terminal buffer content for persistence
 
--- Abduco utility functions
-local abduco = {}
+-- Session management utility functions
+-- Priority: tmux (if available) > abduco (if available) > regular terminal
+local session_manager = {}
 
 function abduco.is_available()
   return vim.fn.executable("abduco") == 1
@@ -64,27 +66,108 @@ end
 
 function abduco.create_and_attach_session(session_name, start_dir)
   if not abduco.is_available() then return false end
-  local shell_cmd = vim.o.shell
-  if start_dir then
-    -- Create session with shell that starts in the right directory
-    return "cd " .. vim.fn.shellescape(start_dir) .. " && abduco -c " .. vim.fn.shellescape(session_name) .. " " .. shell_cmd
+
+  -- Use dvtm if available for better terminal management and scrollback
+  local cmd_to_run
+  if vim.fn.executable("dvtm") == 1 then
+    cmd_to_run = "dvtm"
   else
-    return "abduco -c " .. vim.fn.shellescape(session_name) .. " " .. shell_cmd
+    cmd_to_run = vim.o.shell
+  end
+
+  if start_dir then
+    -- Create session with command that starts in the right directory
+    return "cd " .. vim.fn.shellescape(start_dir) .. " && abduco -c " .. vim.fn.shellescape(session_name) .. " " .. cmd_to_run
+  else
+    return "abduco -c " .. vim.fn.shellescape(session_name) .. " " .. cmd_to_run
   end
 end
 
-local function save_scroll_position(term)
+local function save_terminal_state(term)
   if term.window and vim.api.nvim_win_is_valid(term.window) then
     pcall(function()
       local cursor_pos = vim.api.nvim_win_get_cursor(term.window)
       local view = vim.api.nvim_win_call(term.window, function()
         return vim.fn.winsaveview()
       end)
+
+      -- Save buffer content
+      local buf = vim.api.nvim_win_get_buf(term.window)
+      local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
       terminal_scroll_positions[term.count] = {
         cursor = cursor_pos,
         view = view,
       }
+
+      -- Store buffer content for session persistence
+      if term.abduco_session then
+        terminal_buffers[term.abduco_session] = {
+          lines = lines,
+          cursor = cursor_pos,
+          view = view,
+        }
+      end
     end)
+  end
+end
+
+-- Alias for backward compatibility
+local function save_scroll_position(term)
+  save_terminal_state(term)
+end
+
+local function restore_terminal_state(term, session_name)
+  -- First check if we have saved buffer content for this session
+  if session_name and terminal_buffers[session_name] then
+    vim.defer_fn(function()
+      if term.window and vim.api.nvim_win_is_valid(term.window) then
+        pcall(function()
+          local saved_state = terminal_buffers[session_name]
+          local buf = vim.api.nvim_win_get_buf(term.window)
+
+          -- Create a temporary buffer with saved content
+          local temp_buf = vim.api.nvim_create_buf(false, true)
+          vim.api.nvim_buf_set_lines(temp_buf, 0, -1, false, saved_state.lines)
+
+          -- Show the saved content first
+          vim.api.nvim_win_set_buf(term.window, temp_buf)
+
+          -- Restore cursor position
+          if saved_state.cursor then
+            local line_count = #saved_state.lines
+            local row, col = saved_state.cursor[1], saved_state.cursor[2]
+
+            if row > line_count then row = line_count end
+            if row < 1 then row = 1 end
+
+            pcall(vim.api.nvim_win_set_cursor, term.window, {row, col})
+          end
+
+          -- Restore view
+          if saved_state.view then
+            vim.api.nvim_win_call(term.window, function()
+              vim.fn.winrestview(saved_state.view)
+            end)
+          end
+
+          -- After a short delay, switch back to the actual terminal buffer
+          vim.defer_fn(function()
+            if vim.api.nvim_buf_is_valid(buf) then
+              vim.api.nvim_win_set_buf(term.window, buf)
+              vim.cmd("startinsert")
+            end
+            -- Clean up temp buffer
+            if vim.api.nvim_buf_is_valid(temp_buf) then
+              vim.api.nvim_buf_delete(temp_buf, { force = true })
+            end
+          end, 1000) -- Show saved content for 1 second
+        end)
+      end
+    end, 200)
+  else
+    -- Fallback to regular scroll position restore
+    restore_scroll_position(term)
   end
 end
 
@@ -181,7 +264,7 @@ local function create_title_window(term, terminal_name)
         term.title_win = title_win
         term.title_buf = title_buf
 
-        restore_scroll_position(term)
+        restore_terminal_state(term, term.abduco_session)
       end)
     end)
   end
@@ -247,9 +330,14 @@ local function new_terminal(name, dir)
       vim.cmd("startinsert")
       vim.b.terminal_title = terminal_name
       create_title_window(term, terminal_name)
+
+      -- Restore terminal state if this is an abduco session reconnection
+      if use_abduco and abduco.session_exists(session_name) then
+        restore_terminal_state(term, session_name)
+      end
     end,
     on_close = function(term)
-      save_scroll_position(term)
+      save_terminal_state(term) -- Use the enhanced save function
       cleanup_title_window(term)
     end,
   })
@@ -276,12 +364,12 @@ local function create_predefined_terminal(name)
     -- Terminal object exists, toggle it
     current_term = idx
     if term:is_open() then
-      save_scroll_position(term)
+      save_terminal_state(term)
     end
     term:toggle()
     if term:is_open() then
       vim.cmd("startinsert")
-      restore_scroll_position(term)
+      restore_terminal_state(term, term.abduco_session)
     end
   elseif use_abduco and abduco.session_exists(session_name) then
     -- Abduco session exists but no terminal object, create terminal that attaches to existing session
@@ -316,12 +404,12 @@ M.create_claude_terminal = function()
     -- Terminal object exists, toggle it
     current_term = idx
     if term:is_open() then
-      save_scroll_position(term)
+      save_terminal_state(term)
     end
     term:toggle()
     if term:is_open() then
       vim.cmd("startinsert")
-      restore_scroll_position(term)
+      restore_terminal_state(term, term.abduco_session)
     end
   elseif use_abduco and abduco.session_exists(session_name) then
     -- Abduco session exists but no terminal object, create terminal that attaches to existing session
@@ -421,7 +509,7 @@ local function cycle_terminals()
   end
 
   if terminals[current_term] and terminals[current_term]:is_open() then
-    save_scroll_position(terminals[current_term])
+    save_terminal_state(terminals[current_term])
     terminals[current_term]:close()
   end
 
@@ -430,7 +518,7 @@ local function cycle_terminals()
   terminals[current_term]:toggle()
   if terminals[current_term]:is_open() then
     vim.cmd("startinsert")
-    restore_scroll_position(terminals[current_term])
+    restore_terminal_state(terminals[current_term], terminals[current_term].abduco_session)
   end
 end
 
@@ -441,7 +529,7 @@ local function cycle_backwards()
   end
 
   if terminals[current_term] and terminals[current_term]:is_open() then
-    save_scroll_position(terminals[current_term])
+    save_terminal_state(terminals[current_term])
     terminals[current_term]:close()
   end
 
@@ -452,7 +540,7 @@ local function cycle_backwards()
 
   terminals[current_term]:toggle()
   if terminals[current_term]:is_open() then
-    restore_scroll_position(terminals[current_term])
+    restore_terminal_state(terminals[current_term], terminals[current_term].abduco_session)
   end
 end
 
@@ -506,7 +594,7 @@ M.close_current_terminal = function()
       terminals[current_term]:toggle()
       if terminals[current_term]:is_open() then
         vim.cmd("startinsert")
-        restore_scroll_position(terminals[current_term])
+        restore_terminal_state(terminals[current_term], terminals[current_term].abduco_session)
       end
     else
       current_term = 1
@@ -624,6 +712,7 @@ M.kill_all_terminals = function()
   terminals = {}
   terminal_names = {}
   terminal_scroll_positions = {}
+  terminal_buffers = {} -- Clear all stored terminal buffers
   current_term = 1
   term_count = 0
 
@@ -635,6 +724,8 @@ M.kill_all_terminals = function()
     for _, session in ipairs(all_sessions) do
       if session:match("^pterm%-") then
         if abduco.kill_session(session) then
+          -- Clean up stored terminal buffer for this session
+          terminal_buffers[session] = nil
           killed_count = killed_count + 1
         end
       end
@@ -655,6 +746,8 @@ M.kill_abduco_session = function(session_name)
   if abduco.is_available() then
     local success = abduco.kill_session(session_name)
     if success then
+      -- Clean up stored terminal buffer for this session
+      terminal_buffers[session_name] = nil
       print("Killed abduco session: " .. session_name)
     else
       print("Failed to kill abduco session: " .. session_name)
@@ -703,6 +796,8 @@ M.kill_all_abduco_sessions = function()
   for _, session in ipairs(all_sessions) do
     if session:match("^pterm%-") then
       if abduco.kill_session(session) then
+        -- Clean up stored terminal buffer for this session
+        terminal_buffers[session] = nil
         killed_count = killed_count + 1
       end
     end
@@ -735,14 +830,14 @@ M.pick_terminal = function()
       local term_num = tonumber(string.match(choice, "^(%d+):"))
       if term_num then
         if terminals[current_term] and terminals[current_term]:is_open() then
-          save_scroll_position(terminals[current_term])
+          save_terminal_state(terminals[current_term])
         end
 
         current_term = term_num
         terminals[current_term]:toggle()
         if terminals[current_term]:is_open() then
           vim.cmd("startinsert")
-          restore_scroll_position(terminals[current_term])
+          restore_terminal_state(terminals[current_term], terminals[current_term].abduco_session)
         end
       end
     end
