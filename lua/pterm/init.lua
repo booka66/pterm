@@ -827,39 +827,39 @@ M.setup = function(opts)
   -- Fix paste in terminal mode with sanitization
   map("t", "<D-v>", function()
     local clipboard = vim.fn.getreg("+")
-    if clipboard and clipboard ~= "" then
-      -- Sanitize clipboard content to prevent dangerous characters
-      local sanitized = clipboard
-        -- Remove null bytes and other control characters except common ones
-        :gsub("[\0-\8\11\12\14-\31\127]", "")
-        -- Remove escape sequences that could be dangerous
-        :gsub("\27%[%d*[A-Za-z]", "")  -- Remove ANSI escape sequences
-        :gsub("\27%]%d*;[^\7]*\7", "") -- Remove OSC sequences
-        -- Preserve common control characters
-        -- \9 (tab), \10 (LF), \13 (CR) are preserved
+    if not clipboard or clipboard == "" then
+      return
+    end
 
-      -- Additional safety: limit length to prevent extremely long pastes
-      if #sanitized > 10000 then
-        sanitized = sanitized:sub(1, 10000)
-        vim.notify("Clipboard content truncated to 10,000 characters for safety", vim.log.levels.WARN)
-      end
+    -- Sanitize clipboard content to prevent dangerous characters
+    local sanitized = clipboard
+      -- Remove control characters except tab, LF, CR
+      :gsub("[\0-\8\11\12\14-\31\127]", "")
+      -- Remove escape sequences
+      :gsub("\27%[[%d;]*[A-Za-z]", "")
+      -- Remove OSC sequences
+      :gsub("\27%][^\7]*\7", "")
 
-      if sanitized ~= "" then
-        -- Send sanitized content to terminal
-        if #terminals > 0 and terminals[current_term] then
-          local term = terminals[current_term]
-          if term.use_zellij and term.zellij_session then
-            local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(sanitized)
-            vim.fn.system(cmd)
-          else
-            term:send(sanitized)
-          end
-        end
+    -- Limit length for safety
+    if #sanitized > 5000 then
+      sanitized = sanitized:sub(1, 5000)
+    end
+
+    if sanitized == "" then
+      return
+    end
+
+    -- Send to current terminal
+    if #terminals > 0 and terminals[current_term] then
+      local term = terminals[current_term]
+      if term.use_zellij and term.zellij_session then
+        -- For zellij, we need to be more careful with escaping
+        vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(sanitized))
       else
-        vim.notify("Clipboard content contained only unsafe characters - paste cancelled", vim.log.levels.WARN)
+        term:send(sanitized)
       end
     end
-  end, { desc = "Paste in terminal (sanitized)" })
+  end, { desc = "Paste clipboard (sanitized)" })
 
   map("t", "<C-h>", "<C-\\><C-N><C-w>h", { desc = "Terminal left window nav" })
   map("t", "<C-j>", "<C-\\><C-N><C-w>j", { desc = "Terminal down window nav" })
