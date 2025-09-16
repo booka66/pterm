@@ -164,8 +164,8 @@ M.toggle_terminal = function()
     local current_tab = vim.api.nvim_get_current_tabpage()
 
     if current_tab == tab then
-      -- We're in the terminal tab, switch back to previous tab
-      vim.cmd("tabprevious")
+      -- We're in the terminal tab, delete it
+      M.close_terminal()
     else
       -- Switch to terminal tab
       vim.api.nvim_set_current_tabpage(tab)
