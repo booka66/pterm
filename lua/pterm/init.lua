@@ -849,7 +849,7 @@ M.setup = function(opts)
       return
     end
 
-    -- Send to current terminal
+    -- Send to current terminal - use simple, reliable method
     if #terminals > 0 and terminals[current_term] then
       local term = terminals[current_term]
 
@@ -859,77 +859,11 @@ M.setup = function(opts)
         -- Wait a bit for terminal to open
         vim.defer_fn(function()
           if term:is_open() then
-            if term.use_zellij and term.zellij_session then
-              -- For zellij, send smaller chunks to avoid issues
-              local chunk_size = 1000
-              local session_name = term.zellij_session
-
-              if #sanitized <= chunk_size then
-                -- Small content, send directly with proper escaping
-                local escaped = sanitized:gsub("'", "'\"'\"'")  -- Escape single quotes
-                local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
-                local result = vim.fn.system(cmd)
-                if vim.v.shell_error ~= 0 then
-                  term:send(sanitized)
-                end
-              else
-                -- Large content, send in chunks
-                for i = 1, #sanitized, chunk_size do
-                  local chunk = sanitized:sub(i, i + chunk_size - 1)
-                  local escaped = chunk:gsub("'", "'\"'\"'")  -- Escape single quotes
-                  local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
-                  local result = vim.fn.system(cmd)
-                  if vim.v.shell_error ~= 0 then
-                    -- If any chunk fails, fallback to regular terminal for remaining content
-                    term:send(sanitized:sub(i))
-                    break
-                  end
-                  -- Small delay between chunks to avoid overwhelming zellij
-                  if i + chunk_size < #sanitized then
-                    vim.fn.system("sleep 0.01")
-                  end
-                end
-              end
-            else
-              term:send(sanitized)
-            end
+            term:send(sanitized)
           end
         end, 100)
       else
-        if term.use_zellij and term.zellij_session then
-          -- For zellij, send smaller chunks to avoid issues
-          local chunk_size = 1000
-          local session_name = term.zellij_session
-
-          if #sanitized <= chunk_size then
-            -- Small content, send directly with proper escaping
-            local escaped = sanitized:gsub("'", "'\"'\"'")  -- Escape single quotes
-            local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
-            local result = vim.fn.system(cmd)
-            if vim.v.shell_error ~= 0 then
-              term:send(sanitized)
-            end
-          else
-            -- Large content, send in chunks
-            for i = 1, #sanitized, chunk_size do
-              local chunk = sanitized:sub(i, i + chunk_size - 1)
-              local escaped = chunk:gsub("'", "'\"'\"'")  -- Escape single quotes
-              local cmd = "ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(session_name) .. " zellij action write-chars '" .. escaped .. "'"
-              local result = vim.fn.system(cmd)
-              if vim.v.shell_error ~= 0 then
-                -- If any chunk fails, fallback to regular terminal for remaining content
-                term:send(sanitized:sub(i))
-                break
-              end
-              -- Small delay between chunks to avoid overwhelming zellij
-              if i + chunk_size < #sanitized then
-                vim.fn.system("sleep 0.01")
-              end
-            end
-          end
-        else
-          term:send(sanitized)
-        end
+        term:send(sanitized)
       end
     end
   end, { desc = "Paste clipboard (sanitized)" })
