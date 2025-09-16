@@ -7,9 +7,8 @@ local terminal_names = {}
 local terminal_scroll_positions = {}
 local terminal_buffers = {} -- Store terminal buffer content for persistence
 
--- Session management utility functions
--- Priority: tmux (if available) > abduco (if available) > regular terminal
-local session_manager = {}
+-- Abduco utility functions
+local abduco = {}
 
 function abduco.is_available()
   return vim.fn.executable("abduco") == 1
