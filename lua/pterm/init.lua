@@ -836,9 +836,9 @@ M.setup = function(opts)
       -- Remove null bytes and escape character (but preserve everything else)
       :gsub("[\0\27]", "")
 
-    -- Limit length for safety
-    if #sanitized > 5000 then
-      sanitized = sanitized:sub(1, 5000)
+    -- Limit length for safety (increased from 5000 to 50000 for larger pastes)
+    if #sanitized > 50000 then
+      sanitized = sanitized:sub(1, 50000)
     end
 
     if sanitized == "" then
@@ -848,11 +848,54 @@ M.setup = function(opts)
     -- Send to current terminal
     if #terminals > 0 and terminals[current_term] then
       local term = terminals[current_term]
-      if term.use_zellij and term.zellij_session then
-        -- For zellij, we need to be more careful with escaping
-        vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars " .. vim.fn.shellescape(sanitized))
+
+      -- Ensure terminal is open
+      if not term:is_open() then
+        term:toggle()
+        -- Wait a bit for terminal to open
+        vim.defer_fn(function()
+          if term:is_open() then
+            if term.use_zellij and term.zellij_session then
+              -- Write to temporary file to avoid shell escaping issues
+              local temp_file = vim.fn.tempname()
+              local file = io.open(temp_file, "w")
+              if file then
+                file:write(sanitized)
+                file:close()
+                -- Use zellij to read from file
+                vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars \"$(cat " .. vim.fn.shellescape(temp_file) .. ")\"")
+                vim.fn.delete(temp_file)
+              else
+                -- Fallback to regular send
+                term:send(sanitized)
+              end
+            else
+              term:send(sanitized)
+            end
+          end
+        end, 100)
       else
-        term:send(sanitized)
+        if term.use_zellij and term.zellij_session then
+          -- Write to temporary file to avoid shell escaping issues
+          local temp_file = vim.fn.tempname()
+          local file = io.open(temp_file, "w")
+          if file then
+            file:write(sanitized)
+            file:close()
+            -- Use zellij to read from file
+            local success = vim.fn.system("ZELLIJ_SESSION_NAME=" .. vim.fn.shellescape(term.zellij_session) .. " zellij action write-chars \"$(cat " .. vim.fn.shellescape(temp_file) .. ")\"")
+            vim.fn.delete(temp_file)
+            -- If zellij fails, fallback to regular terminal
+            if vim.v.shell_error ~= 0 then
+              term:send(sanitized)
+            end
+          else
+            -- Fallback to regular send
+            term:send(sanitized)
+          end
+        else
+          term:send(sanitized)
+        end
       end
     end
   end, { desc = "Paste clipboard (sanitized)" })
