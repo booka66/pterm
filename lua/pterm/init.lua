@@ -831,10 +831,14 @@ M.setup = function(opts)
       return
     end
 
-    -- Minimal sanitization - only remove truly dangerous characters
+    -- Strict sanitization - only allow common coding characters
     local sanitized = clipboard
-      -- Remove null bytes and escape character (but preserve everything else)
-      :gsub("[\0\27]", "")
+      -- Keep only printable ASCII, common whitespace, and newlines
+      -- This removes problematic Unicode separators and control characters
+      :gsub("[^\32-\126\9\10\13]", "")
+      -- Normalize line endings to Unix style
+      :gsub("\r\n", "\n")
+      :gsub("\r", "\n")
 
     -- Limit length for safety (increased from 5000 to 50000 for larger pastes)
     if #sanitized > 50000 then
